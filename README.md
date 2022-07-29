@@ -55,4 +55,4 @@ sudo() {
 
 There is no guarantee that the ppa package is absolutely stable, the ppa package is not designed to be used by Debian
 
-Any version of Ubuntu 21.10 (impish,jammy,kinetic) and above cannot be installed on debian, This is because debian's dpkg does not recognize the tar.zst format
+Any version of Ubuntu 21.10 and above (impish,jammy,kinetic) cannot be installed on debian, This is because debian's dpkg does not recognize the tar.zst format
