@@ -16,7 +16,8 @@ sudo cp add-apt-repository-debian/add-apt-repository-debian /usr/bin/add-apt-rep
 
 ## Usage
 
-Just like on ubuntu, you can just type add-apt-repository-debian (ppa package name) to install the packages  
+Just like on ubuntu, you can just type add-apt-repository-debian (ppa package name) to install the packages
+
 Here is an example of installing Ulauncher
 
 ```bash
@@ -30,6 +31,8 @@ The default installed version is focal, if you want to switch the installed vers
 ```bash
 sudo add-apt-repository-debian ppa:agornostal/ulauncher -c focal
 ```
+
+You can also edit the file at /etc/apt/sources.list.d/add-apt-repository-debian/config to change the default installed version
 
 You can replace the original command with the following code  
 Add the code to .bashrc, or .zshrc if you are using zsh
@@ -51,3 +54,5 @@ sudo() {
 ## Important
 
 There is no guarantee that the ppa package is absolutely stable, the ppa package is not designed to be used by Debian
+
+Any version of Ubuntu 21.10 (impish,jammy,kinetic) and above cannot be installed on debian, This is because debian's dpkg does not recognize the tar.zst format

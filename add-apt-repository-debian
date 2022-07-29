@@ -194,6 +194,31 @@ if __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(
         sys.stdout.detach(), encoding="UTF-8", line_buffering=True)
 
+    configdir = apt_pkg.config.find_dir("Dir::Etc::sourceparts")
+    configdir = os.path.join(configdir, 'add-apt-repository-debian')
+    configfilepath = os.path.join(configdir, 'config')
+    configdist = {}
+
+    if not os.path.exists(configdir):
+        os.mkdir(configdir)
+
+        with open(configfilepath, 'w') as f:
+            f.write('version='+install_version)
+            f.close()
+    else:
+        with open(configfilepath, 'r') as f:
+            for line in f.readlines():
+                if line.find('#') != -1:
+                    continue
+
+                tbl = line.split('=')
+
+                if len(tbl) < 1:
+                    continue
+
+                configdist[tbl[0].strip()] = tbl[1].strip() or None
+            f.close()
+
     try:
         locale.setlocale(locale.LC_ALL, "")
     except:
@@ -261,7 +286,15 @@ sources.list
         print(_("Error: need a single repository as argument"))
         sys.exit(1)
 
-    install_version = options.change_version
+    configversion = configdist.get('version', install_version)
+    optionsversion = options.change_version
+    __install_version = install_version
+
+    if configversion != __install_version:
+        install_version = configversion
+
+    if optionsversion != __install_version:
+        install_version = options.change_version
 
     # force new ppa file to be 644 (LP: #399709)
     os.umask(0o022)
