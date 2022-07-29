@@ -294,7 +294,7 @@ sources.list
         install_version = configversion
 
     if optionsversion != __install_version:
-        install_version = options.change_version
+        install_version = optionsversion
 
     # force new ppa file to be 644 (LP: #399709)
     os.umask(0o022)
