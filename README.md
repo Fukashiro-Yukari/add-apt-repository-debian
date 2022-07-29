@@ -16,7 +16,7 @@ sudo cp add-apt-repository-debian/add-apt-repository-debian /usr/bin/add-apt-rep
 
 ## Usage
 
-Just like on ubuntu, you can just type add-apt-repository-debian (ppa package name) to install the packages
+Just like on ubuntu, you can just type add-apt-repository-debian (ppa package name) to install the packages  
 Here is an example of installing Ulauncher
 
 ```bash
