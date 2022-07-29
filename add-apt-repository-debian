@@ -1,0 +1,356 @@
+#! /usr/bin/python3
+
+from __future__ import print_function
+from email.policy import default
+
+import apt_pkg
+import io
+import os
+import re
+import sys
+import gettext
+import locale
+import logging
+import threading
+
+from softwareproperties.SoftwareProperties import SoftwareProperties, shortcut_handler
+from softwareproperties.shortcuts import ShortcutException
+from softwareproperties import ppa
+import aptsources
+from aptsources.sourceslist import SourceEntry
+from optparse import OptionParser
+from gettext import gettext as _
+
+
+install_version = 'focal'
+
+
+def encode(s):
+    return re.sub("[^a-zA-Z0-9_-]", "_", s)
+
+
+class AddPPASigningKey(ppa.AddPPASigningKey):
+    def _recv_key(self, keyring, signing_key_fingerprint, keyring_dir):
+        try:
+            # double check that the signing key is a v4 fingerprint (160bit)
+            if not ppa.verify_keyid_is_v4(signing_key_fingerprint):
+                print("Error: signing key fingerprint '%s' too short" %
+                      signing_key_fingerprint)
+                return False
+        except TypeError:
+            print("Error: signing key fingerprint does not exist")
+            return False
+        # then get it
+        res = ppa.subprocess.call(self.GPG_DEFAULT_OPTIONS + [
+            "--homedir", keyring_dir,
+            "--keyring", keyring,
+            "--keyserver", self.keyserver,
+            "--recv", signing_key_fingerprint,
+        ])
+        return (res == 0)
+
+    def _export_key(self, keyring, export_keyring, signing_key_fingerprint, keyring_dir):
+        res = ppa.subprocess.call(self.GPG_DEFAULT_OPTIONS + [
+            "--homedir", keyring_dir,
+            "--keyring", keyring,
+            "--output", export_keyring,
+            "--export", signing_key_fingerprint,
+        ])
+        if res != 0:
+            return False
+        return True
+
+    def add_ppa_signing_key(self, ppa_path=None):
+        """Query and add the corresponding PPA signing key.
+
+        The signing key fingerprint is obtained from the Launchpad PPA page,
+        via a secure channel, so it can be trusted.
+        """
+        trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
+
+        if not os.path.exists(trustedgpgd):
+            os.mkdir(trustedgpgd)
+
+        if ppa_path is None:
+            ppa_path = self.ppa_path
+
+        def cleanup(tmpdir):
+            ppa.shutil.rmtree(tmpdir)
+
+        try:
+            ppa_info = ppa.get_ppa_info(ppa_path)
+        except ppa.PPAException as e:
+            print(e.value)
+            return False
+        try:
+            signing_key_fingerprint = ppa_info["signing_key_fingerprint"]
+        except IndexError as e:
+            print("Error: can't find signing_key_fingerprint at %s" % ppa_path)
+            return False
+        # create temp keyrings
+        tmp_keyring_dir = ppa.tempfile.mkdtemp()
+        tmp_keyring = os.path.join(tmp_keyring_dir, "pubring.gpg")
+        #  download the key into a temp keyring first
+        if not self._recv_key(
+                tmp_keyring, signing_key_fingerprint, tmp_keyring_dir):
+            cleanup(tmp_keyring_dir)
+            return False
+        # now export the key into a temp keyring using the long key id
+        export_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
+            encode(ppa_info["reference"][1:])))
+        if not self._export_key(
+                tmp_keyring, export_keyring, signing_key_fingerprint, tmp_keyring_dir):
+            cleanup(tmp_keyring_dir)
+            return False
+        # now verify the fingerprint
+        if not self._verify_fingerprint(
+                export_keyring, signing_key_fingerprint, tmp_keyring_dir):
+            cleanup(tmp_keyring_dir)
+            return False
+        # # and add it
+        # trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
+        # apt_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
+        #     encode(ppa_info["reference"][1:])))
+        # res = ppa.subprocess.call(["apt-key", "--keyring", apt_keyring, "add",
+        #     tmp_keyring])
+        # cleanup
+        cleanup(tmp_keyring_dir)
+        return True
+
+
+def ppa_add_key(reference, keyserver=None):
+    apsk = AddPPASigningKey(reference, keyserver=keyserver)
+    return apsk.add_ppa_signing_key()
+
+
+class SoftwareProperties(SoftwareProperties):
+    def add_source_from_shortcut(self, shortcut, enable_source_code=False):
+        """
+        Add a source with the given shortcut and add the signing key if the
+        site is in whitelist or the shortcut implementer adds it.
+        """
+
+        (deb_line, file) = shortcut.expand(codename=install_version)
+        deb_line = self.expand_http_line(deb_line)
+        debsrc_entry_type = 'deb-src' if enable_source_code else '# deb-src'
+        debsrc_line = debsrc_entry_type + deb_line[3:]
+        new_deb_entry = SourceEntry(deb_line, file)
+        new_debsrc_entry = SourceEntry(debsrc_line, file)
+        if new_deb_entry.invalid or new_debsrc_entry.invalid:
+            return False
+        worker = self.check_and_add_key_for_whitelisted_shortcut(shortcut)
+        self.sourceslist.add(new_deb_entry.type,
+                             new_deb_entry.uri,
+                             new_deb_entry.dist,
+                             new_deb_entry.comps,
+                             comment=new_deb_entry.comment,
+                             file=new_deb_entry.file,
+                             architectures=new_deb_entry.architectures)
+        self.sourceslist.add(debsrc_entry_type,
+                             new_debsrc_entry.uri,
+                             new_debsrc_entry.dist,
+                             new_debsrc_entry.comps,
+                             comment=new_debsrc_entry.comment,
+                             file=new_debsrc_entry.file,
+                             architectures=new_debsrc_entry.architectures)
+        self.set_modified_sourceslist()
+
+        if worker:
+            # wait for GPG key to be downloaded
+            worker.join(30)
+        if self.options and self.options.update:
+            import apt
+            cache = apt.Cache()
+            cache.update(sources_list=new_debsrc_entry.file)
+        return True
+
+    def check_and_add_key_for_whitelisted_shortcut(self, shortcut):
+        """
+        helper that adds the gpg key of the channel to the apt
+        keyring *if* the channel is in the whitelist
+        /usr/share/app-install/channels or it is a public Launchpad PPA.
+        """
+        (srcline, _fname) = shortcut.expand(codename=install_version)
+        channel = self._is_line_in_whitelisted_channel(srcline)
+        if channel:
+            keyp = "%s/%s.key" % (self.CHANNEL_PATH, channel)
+            self.add_key(keyp)
+
+        cdata = (shortcut._info["reference"], {'keyserver': (
+            self.options and self.options.keyserver)})
+
+        def addkey_func():
+            reference, kwargs = cdata
+
+            ppa_add_key(reference, **kwargs)
+
+        worker = threading.Thread(target=addkey_func)
+        worker.start()
+        return worker
+
+
+if __name__ == "__main__":
+    # Force encoding to UTF-8 even in non-UTF-8 locales.
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.detach(), encoding="UTF-8", line_buffering=True)
+
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except:
+        pass
+    gettext.textdomain("software-properties")
+    usage = """Usage: %prog <sourceline>
+
+%prog is a script for adding apt sources.list entries.
+It can be used to add any repository and also provides a shorthand
+syntax for adding a Launchpad PPA (Personal Package Archive)
+repository.
+
+<sourceline> - The apt repository source line to add. This is one of:
+  a complete apt line in quotes,
+  a repo url and areas in quotes (areas defaults to 'main')
+  a PPA shortcut.
+  a distro component
+
+  Examples:
+    apt-add-repository 'deb http://myserver/path/to/repo stable myrepo'
+    apt-add-repository 'http://myserver/path/to/repo myrepo'
+    apt-add-repository 'https://packages.medibuntu.org free non-free'
+    apt-add-repository http://extras.ubuntu.com/ubuntu
+    apt-add-repository ppa:user/repository
+    apt-add-repository ppa:user/distro/repository
+    apt-add-repository multiverse
+
+If --remove is given the tool will remove the given sourceline from your
+sources.list
+"""
+    parser = OptionParser(usage)
+    # FIXME: provide a --sources-list-file= option that
+    #        puts the line into a specific file in sources.list.d
+    parser.add_option("-m", "--massive-debug", action="store_true",
+                      dest="massive_debug", default=False,
+                      help=_("Print a lot of debug information to the command line"))
+    parser.add_option("-r", "--remove", action="store_true",
+                      dest="remove", default=False,
+                      help=_("remove repository from sources.list.d directory"))
+    parser.add_option("-k", "--keyserver",
+                      dest="keyserver", default=ppa.DEFAULT_KEYSERVER,
+                      help=_("URL of keyserver. Default: %default"))
+    parser.add_option("-s", "--enable-source", action="store_true",
+                      dest="enable_source", default=False,
+                      help=_("Allow downloading of the source packages from the repository"))
+    parser.add_option("-y", "--yes", action="store_true",
+                      dest="assume_yes", default=False,
+                      help=_("Assume yes to all queries"))
+    parser.add_option("-u", "--update", action="store_true",
+                      dest="update", default=False,
+                      help=_("Update package cache after adding"))
+    parser.add_option("-c", "--change-version",
+                      dest="change_version", default=install_version,
+                      help=_("Installed version. Default: %default"))
+    (options, args) = parser.parse_args()
+
+    if os.geteuid() != 0:
+        print(_("Error: must run as root"))
+        sys.exit(1)
+
+    if len(args) == 0:
+        print(_("Error: need a repository as argument"))
+        sys.exit(1)
+    elif len(args) > 1:
+        print(_("Error: need a single repository as argument"))
+        sys.exit(1)
+
+    install_version = options.change_version
+
+    # force new ppa file to be 644 (LP: #399709)
+    os.umask(0o022)
+
+    # get the line
+    line = args[0]
+
+    # add it
+    sp = SoftwareProperties(options=options)
+    distro = aptsources.distro.get_distro()
+    distro.get_sources(sp.sourceslist)
+
+    # check if its a component that should be added/removed
+    components = [comp.name for comp in distro.source_template.components]
+    if line in components:
+        if options.remove:
+            if line in distro.enabled_comps:
+                distro.disable_component(line)
+                print(_("'%s' distribution component disabled for all sources.") % line)
+            else:
+                print(
+                    _("'%s' distribution component is already disabled for all sources.") % line)
+                sys.exit(0)
+        else:
+            if line not in distro.enabled_comps:
+                distro.enable_component(line)
+                print(_("'%s' distribution component enabled for all sources.") % line)
+            else:
+                print(
+                    _("'%s' distribution component is already enabled for all sources.") % line)
+                sys.exit(0)
+        sp.sourceslist.save()
+        sys.exit(0)
+
+    # this wasn't a component name ('multiverse', 'backports'), so its either
+    # a actual line to be added or a shortcut.
+    try:
+        shortcut = shortcut_handler(line)
+    except ShortcutException as e:
+        print(e)
+        sys.exit(1)
+
+    # display more information about the shortcut / ppa info
+    if not options.assume_yes and shortcut.should_confirm():
+        try:
+            info = shortcut.info()
+        except ShortcutException as e:
+            print(e)
+            sys.exit(1)
+
+        print(" %s" % (info["description"] or ""))
+        print(_(" More info: %s") % str(info["web_link"]))
+        if (sys.stdin.isatty() and
+                not "FORCE_ADD_APT_REPOSITORY" in os.environ):
+            if options.remove:
+                print(
+                    _("Press [ENTER] to continue or ctrl-c to cancel removing it"))
+            else:
+                print(
+                    _("Press [ENTER] to continue or ctrl-c to cancel adding it"))
+            sys.stdin.readline()
+
+    if options.remove:
+        try:
+            (line, file) = shortcut.expand(codename=install_version)
+        except ShortcutException as e:
+            print(e)
+            sys.exit(1)
+        deb_line = sp.expand_http_line(line)
+        debsrc_line = 'deb-src' + deb_line[3:]
+        deb_entry = SourceEntry(deb_line, file)
+        debsrc_entry = SourceEntry(debsrc_line, file)
+        try:
+            sp.remove_source(deb_entry)
+        except ValueError:
+            print(_("Error: '%s' doesn't exist in a sourcelist file") % deb_line)
+        try:
+            sp.remove_source(debsrc_entry)
+        except ValueError:
+            print(_("Error: '%s' doesn't exist in a sourcelist file") %
+                  debsrc_line)
+
+    else:
+        try:
+            if not sp.add_source_from_shortcut(shortcut, options.enable_source):
+                print(_("Error: '%s' invalid") % line)
+                sys.exit(1)
+        except ShortcutException as e:
+            print(e)
+            sys.exit(1)
+
+        sp.sourceslist.save()
