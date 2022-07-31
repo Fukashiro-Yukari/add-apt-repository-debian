@@ -68,16 +68,10 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
         The signing key fingerprint is obtained from the Launchpad PPA page,
         via a secure channel, so it can be trusted.
         """
-        trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
-
-        if not os.path.exists(trustedgpgd):
-            os.mkdir(trustedgpgd)
-
         if ppa_path is None:
             ppa_path = self.ppa_path
 
         def cleanup(tmpdir):
-            # wtf
             try:
                 shutil.rmtree(tmpdir, True)
             except FileNotFoundError as e:
@@ -102,23 +96,22 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
             cleanup(tmp_keyring_dir)
             return False
         # now export the key into a temp keyring using the long key id
-        export_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
-            encode(ppa_info["reference"][1:])))
+        tmp_export_keyring = os.path.join(
+            tmp_keyring_dir, "export-keyring.gpg")
         if not self._export_key(
-                tmp_keyring, export_keyring, signing_key_fingerprint, tmp_keyring_dir):
+                tmp_keyring, tmp_export_keyring, signing_key_fingerprint, tmp_keyring_dir):
             cleanup(tmp_keyring_dir)
             return False
         # now verify the fingerprint
         if not self._verify_fingerprint(
-                export_keyring, signing_key_fingerprint, tmp_keyring_dir):
+                tmp_export_keyring, signing_key_fingerprint, tmp_keyring_dir):
             cleanup(tmp_keyring_dir)
             return False
-        # # and add it
-        # trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
-        # apt_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
-        #     encode(ppa_info["reference"][1:])))
-        # res = subprocess.call(["apt-key", "--keyring", apt_keyring, "add",
-        #     tmp_keyring])
+        # and add it
+        trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
+        export_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
+            encode(ppa_info["reference"][1:])))
+        shutil.move(tmp_export_keyring, export_keyring)
         # cleanup
         cleanup(tmp_keyring_dir)
         return True
