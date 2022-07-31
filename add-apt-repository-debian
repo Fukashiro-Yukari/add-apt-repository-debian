@@ -10,8 +10,10 @@ import re
 import sys
 import gettext
 import locale
-import logging
+import shutil
+import subprocess
 import threading
+import tempfile
 
 from softwareproperties.SoftwareProperties import SoftwareProperties, shortcut_handler
 from softwareproperties.shortcuts import ShortcutException
@@ -41,7 +43,7 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
             print("Error: signing key fingerprint does not exist")
             return False
         # then get it
-        res = ppa.subprocess.call(self.GPG_DEFAULT_OPTIONS + [
+        res = subprocess.call(self.GPG_DEFAULT_OPTIONS + [
             "--homedir", keyring_dir,
             "--keyring", keyring,
             "--keyserver", self.keyserver,
@@ -50,7 +52,7 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
         return (res == 0)
 
     def _export_key(self, keyring, export_keyring, signing_key_fingerprint, keyring_dir):
-        res = ppa.subprocess.call(self.GPG_DEFAULT_OPTIONS + [
+        res = subprocess.call(self.GPG_DEFAULT_OPTIONS + [
             "--homedir", keyring_dir,
             "--keyring", keyring,
             "--output", export_keyring,
@@ -75,7 +77,11 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
             ppa_path = self.ppa_path
 
         def cleanup(tmpdir):
-            ppa.shutil.rmtree(tmpdir)
+            # wtf
+            try:
+                shutil.rmtree(tmpdir, True)
+            except FileNotFoundError as e:
+                print(tmpdir, str(e))
 
         try:
             ppa_info = ppa.get_ppa_info(ppa_path)
@@ -88,7 +94,7 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
             print("Error: can't find signing_key_fingerprint at %s" % ppa_path)
             return False
         # create temp keyrings
-        tmp_keyring_dir = ppa.tempfile.mkdtemp()
+        tmp_keyring_dir = tempfile.mkdtemp()
         tmp_keyring = os.path.join(tmp_keyring_dir, "pubring.gpg")
         #  download the key into a temp keyring first
         if not self._recv_key(
@@ -111,7 +117,7 @@ class AddPPASigningKey(ppa.AddPPASigningKey):
         # trustedgpgd = apt_pkg.config.find_dir("Dir::Etc::trustedparts")
         # apt_keyring = os.path.join(trustedgpgd, "%s.gpg" % (
         #     encode(ppa_info["reference"][1:])))
-        # res = ppa.subprocess.call(["apt-key", "--keyring", apt_keyring, "add",
+        # res = subprocess.call(["apt-key", "--keyring", apt_keyring, "add",
         #     tmp_keyring])
         # cleanup
         cleanup(tmp_keyring_dir)
